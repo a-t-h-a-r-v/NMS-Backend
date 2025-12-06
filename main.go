@@ -171,8 +171,8 @@ func startTrapReceiver() {
 	}
 
 	tl.Params = gosnmp.Default
-	tl.Params.Port = 162
-
+	
+	// Bind to port 162
 	if err := tl.Listen("0.0.0.0:162"); err != nil {
 		log.Printf("Error listening for traps: %v", err)
 		dbLog("ERROR", "TrapReceiver", "Failed to bind port 162: "+err.Error())
@@ -585,33 +585,64 @@ func incIP(ip net.IP) {
 
 func handleDevices(w http.ResponseWriter, r *http.Request) {
 	enableCors(&w)
-	if r.Method == "OPTIONS" { return }
-
+	if r.Method == "OPTIONS" {
+		return
+	}
+	
 	// 1. CREATE (POST)
 	if r.Method == "POST" {
 		var d struct {
 			Hostname  string `json:"hostname"`
 			Ip        string `json:"ip"`
 			Community string `json:"community"`
+			Force     bool   `json:"force"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-			http.Error(w, "Invalid JSON", 400); return
+			http.Error(w, "Invalid JSON", 400)
+			return
 		}
 		if d.Hostname == "" || d.Ip == "" {
-			http.Error(w, "Fields required", 400); return
+			http.Error(w, "Fields required", 400)
+			return
 		}
-		if d.Community == "" { d.Community = "public" }
+		if d.Community == "" {
+			d.Community = "public"
+		}
 
-		_, err := db.Exec("INSERT INTO devices (hostname, ip_address, community_string) VALUES (?,?,?)", d.Hostname, d.Ip, d.Community)
+		// Check Duplicate
+		var existingId int
+		var existingHost string
+		err := db.QueryRow("SELECT id, hostname FROM devices WHERE ip_address=?", d.Ip).Scan(&existingId, &existingHost)
+		if err == nil {
+			// Duplicate Found
+			if !d.Force {
+				w.WriteHeader(http.StatusConflict) // 409
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": "Duplicate IP", "existing_hostname": existingHost, "existing_id": existingId,
+				})
+				return
+			} else {
+				// Force Update
+				_, err := db.Exec("UPDATE devices SET hostname=?, community_string=?, is_paused=0 WHERE id=?", d.Hostname, d.Community, existingId)
+				if err != nil { http.Error(w, err.Error(), 500); return }
+				dbLog("INFO", "API", fmt.Sprintf("Overwrote device %d via Scan/Force", existingId))
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+
+		// Insert New
+		_, err = db.Exec("INSERT INTO devices (hostname, ip_address, community_string) VALUES (?,?,?)", d.Hostname, d.Ip, d.Community)
 		if err != nil {
-			http.Error(w, err.Error(), 500); return
+			http.Error(w, err.Error(), 500)
+			return
 		}
 		dbLog("INFO", "API", "Added device: "+d.Hostname)
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
 
-	// 2. EDIT / UPDATE (PUT) - NEW FEATURE
+	// 2. EDIT (PUT)
 	if r.Method == "PUT" {
 		var d struct {
 			Id        int    `json:"id"`
@@ -619,22 +650,15 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 			Ip        string `json:"ip"`
 			Community string `json:"community"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-			http.Error(w, "Invalid JSON", 400); return
-		}
-		
-		_, err := db.Exec("UPDATE devices SET hostname=?, ip_address=?, community_string=? WHERE id=?", 
-			d.Hostname, d.Ip, d.Community, d.Id)
-		
-		if err != nil {
-			http.Error(w, err.Error(), 500); return
-		}
+		json.NewDecoder(r.Body).Decode(&d)
+		_, err := db.Exec("UPDATE devices SET hostname=?, ip_address=?, community_string=? WHERE id=?", d.Hostname, d.Ip, d.Community, d.Id)
+		if err != nil { http.Error(w, err.Error(), 500); return }
 		dbLog("INFO", "API", fmt.Sprintf("Updated device ID %d", d.Id))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// 3. LIST / SEARCH (GET)
+	// 3. LIST (GET)
 	query := r.URL.Query().Get("q")
 	sqlStr := "SELECT id, hostname, ip_address, community_string, COALESCE(sys_descr,''), COALESCE(sys_location,''), is_paused FROM devices"
 	var args []interface{}
@@ -644,20 +668,19 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, _ := db.Query(sqlStr, args...)
 	defer rows.Close()
-	
 	var res []map[string]interface{}
 	for rows.Next() {
 		var id int
 		var h, ip, comm, desc, loc string
 		var p bool
-		// Note: Added community_string to the scan so we can show it in the edit form
 		rows.Scan(&id, &h, &ip, &comm, &desc, &loc, &p)
 		res = append(res, map[string]interface{}{
-			"id": id, "hostname": h, "ip": ip, "community": comm, 
-			"description": desc, "location": loc, "is_paused": p,
+			"id": id, "hostname": h, "ip": ip, "community": comm, "description": desc, "location": loc, "is_paused": p,
 		})
 	}
-	if res == nil { res = []map[string]interface{}{} }
+	if res == nil {
+		res = []map[string]interface{}{}
+	}
 	json.NewEncoder(w).Encode(res)
 }
 
