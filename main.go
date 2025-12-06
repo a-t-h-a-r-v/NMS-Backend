@@ -217,17 +217,35 @@ func collectDevice(id int, host, ip, comm string) {
 		Timeout:   time.Duration(timeout) * time.Millisecond,
 		Retries:   1,
 	}
+
+	// 1. Setup Local Socket
 	if err := snmp.Connect(); err != nil {
-		dbLog("ERROR", "Poller", fmt.Sprintf("[%s] Unreachable: %v", host, err))
-		createAlert(id, "critical", "Device Unreachable (Connection Refused/Timeout)")
+		dbLog("ERROR", "Poller", fmt.Sprintf("[%s] Socket Error: %v", host, err))
+		createAlert(id, "critical", "Device Socket Error: "+err.Error())
 		return
 	}
 	defer snmp.Conn.Close()
 
-	// Collect Data
+	// 2. CONNECTIVITY CHECK (The Fix)
+	// We try to fetch "sysUpTime" (.1.3.6.1.2.1.1.3.0) as a "Ping"
+	// If this times out, the device is definitely down.
+	oids := []string{".1.3.6.1.2.1.1.3.0"} 
+	_, err := snmp.Get(oids)
+	if err != nil {
+		dbLog("ERROR", "Poller", fmt.Sprintf("[%s] Unreachable (Timeout): %v", host, err))
+		createAlert(id, "critical", "Device Unreachable (Connection Timeout)")
+		return // Stop here, don't try to collect other metrics
+	}
+
+	// 3. If we are here, Device is UP. Clear any previous "Down" alerts?
+	// (Optional: In a real app, you might auto-resolve alerts here)
+
+	// 4. Collect Data
+	// (We no longer need to check for errors inside these as strictly, 
+	// because we know the device is reachable, but partial failures can still occur)
 	collectSystemInfo(id, snmp)
-	collectHealthAndProtocols(id, snmp) // Includes Alert Logic
-	collectInterfaces(id, snmp)         // Includes Alert Logic
+	collectHealthAndProtocols(id, snmp) 
+	collectInterfaces(id, snmp)         
 	collectStorage(id, snmp)
 	collectSensors(id, snmp)
 }
