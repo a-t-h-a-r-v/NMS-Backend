@@ -585,10 +585,9 @@ func incIP(ip net.IP) {
 
 func handleDevices(w http.ResponseWriter, r *http.Request) {
 	enableCors(&w)
-	if r.Method == "OPTIONS" {
-		return
-	}
-	// POST
+	if r.Method == "OPTIONS" { return }
+
+	// 1. CREATE (POST)
 	if r.Method == "POST" {
 		var d struct {
 			Hostname  string `json:"hostname"`
@@ -596,28 +595,48 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 			Community string `json:"community"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-			http.Error(w, "Invalid JSON", 400)
-			return
+			http.Error(w, "Invalid JSON", 400); return
 		}
 		if d.Hostname == "" || d.Ip == "" {
-			http.Error(w, "Fields required", 400)
-			return
+			http.Error(w, "Fields required", 400); return
 		}
-		if d.Community == "" {
-			d.Community = "public"
-		}
+		if d.Community == "" { d.Community = "public" }
+
 		_, err := db.Exec("INSERT INTO devices (hostname, ip_address, community_string) VALUES (?,?,?)", d.Hostname, d.Ip, d.Community)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+			http.Error(w, err.Error(), 500); return
 		}
 		dbLog("INFO", "API", "Added device: "+d.Hostname)
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
-	// GET
+
+	// 2. EDIT / UPDATE (PUT) - NEW FEATURE
+	if r.Method == "PUT" {
+		var d struct {
+			Id        int    `json:"id"`
+			Hostname  string `json:"hostname"`
+			Ip        string `json:"ip"`
+			Community string `json:"community"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
+			http.Error(w, "Invalid JSON", 400); return
+		}
+		
+		_, err := db.Exec("UPDATE devices SET hostname=?, ip_address=?, community_string=? WHERE id=?", 
+			d.Hostname, d.Ip, d.Community, d.Id)
+		
+		if err != nil {
+			http.Error(w, err.Error(), 500); return
+		}
+		dbLog("INFO", "API", fmt.Sprintf("Updated device ID %d", d.Id))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// 3. LIST / SEARCH (GET)
 	query := r.URL.Query().Get("q")
-	sqlStr := "SELECT id, hostname, ip_address, COALESCE(sys_descr,''), COALESCE(sys_location,''), is_paused FROM devices"
+	sqlStr := "SELECT id, hostname, ip_address, community_string, COALESCE(sys_descr,''), COALESCE(sys_location,''), is_paused FROM devices"
 	var args []interface{}
 	if query != "" {
 		sqlStr += " WHERE hostname LIKE ? OR ip_address LIKE ?"
@@ -625,19 +644,20 @@ func handleDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, _ := db.Query(sqlStr, args...)
 	defer rows.Close()
+	
 	var res []map[string]interface{}
 	for rows.Next() {
 		var id int
-		var h, ip, desc, loc string
+		var h, ip, comm, desc, loc string
 		var p bool
-		rows.Scan(&id, &h, &ip, &desc, &loc, &p)
+		// Note: Added community_string to the scan so we can show it in the edit form
+		rows.Scan(&id, &h, &ip, &comm, &desc, &loc, &p)
 		res = append(res, map[string]interface{}{
-			"id": id, "hostname": h, "ip": ip, "description": desc, "location": loc, "is_paused": p,
+			"id": id, "hostname": h, "ip": ip, "community": comm, 
+			"description": desc, "location": loc, "is_paused": p,
 		})
 	}
-	if res == nil {
-		res = []map[string]interface{}{}
-	}
+	if res == nil { res = []map[string]interface{}{} }
 	json.NewEncoder(w).Encode(res)
 }
 
