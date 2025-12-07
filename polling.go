@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,18 +82,30 @@ func collectDevice(id int, host, ip, comm string) {
 		Timeout:   time.Duration(timeout) * time.Millisecond,
 		Retries:   1,
 	}
+
+	// 1. Open Socket
 	if err := snmp.Connect(); err != nil {
 		dbLog("ERROR", "Poller", fmt.Sprintf("[%s] Socket Error: %v", host, err))
+		// MARK AS DOWN
+		db.Exec("UPDATE devices SET status='down' WHERE id=?", id)
 		createAlert(id, "critical", "Device Socket Error: "+err.Error())
 		return
 	}
 	defer snmp.Conn.Close()
+
+	// 2. Connectivity Check (Ping via SysUpTime)
 	_, err := snmp.Get([]string{OID_SYS_UPTIME})
 	if err != nil {
 		dbLog("ERROR", "Poller", fmt.Sprintf("[%s] Unreachable: %v", host, err))
+		// MARK AS DOWN
+		db.Exec("UPDATE devices SET status='down' WHERE id=?", id)
 		createAlert(id, "critical", "Device Unreachable (Timeout)")
 		return
 	}
+
+	// MARK AS UP
+	db.Exec("UPDATE devices SET status='up' WHERE id=?", id)
+
 	collectSystemInfo(id, snmp)
 	collectHealthAndProtocols(id, snmp)
 	collectInterfaces(id, snmp)
@@ -330,39 +341,5 @@ func collectSensors(id int, snmp *gosnmp.GoSNMP) {
 			continue
 		}
 		stmt.Exec(id, s.Name, "temperature", s.Val)
-	}
-}
-
-// --- Helpers ---
-func dbLog(level, source, msg string) {
-	log.Printf("[%s] %s: %s", level, source, msg)
-	go func() {
-		db.Exec("INSERT INTO system_logs (level, source, message) VALUES (?,?,?)", level, source, msg)
-	}()
-}
-
-func getSettingInt(key string, def int) int {
-	var val string
-	if err := db.QueryRow("SELECT value_str FROM settings WHERE key_name=?", key).Scan(&val); err != nil {
-		return def
-	}
-	i, _ := strconv.Atoi(val)
-	return i
-}
-
-func createAlert(devId int, severity, msg string) {
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM alerts WHERE device_id=? AND message=? AND is_active=1", devId, msg).Scan(&count)
-	if count == 0 {
-		db.Exec("INSERT INTO alerts (device_id, severity, message) VALUES (?,?,?)", devId, severity, msg)
-	}
-}
-
-func incIP(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
-		}
 	}
 }
