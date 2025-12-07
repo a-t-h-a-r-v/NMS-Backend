@@ -31,25 +31,63 @@ func handleUsers(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		json.NewEncoder(w).Encode(users)
+
 	} else if r.Method == "POST" {
 		var req struct{ Username, Password, Role, Email string }
 		json.NewDecoder(r.Body).Decode(&req)
 
+		// 1. Validate Mandatory Email
+		if req.Email == "" {
+			http.Error(w, "Email is required", 400)
+			return
+		}
+
+		// 2. Check for Duplicate Username
+		var userExists int
+		err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", req.Username).Scan(&userExists)
+		if err == nil && userExists > 0 {
+			http.Error(w, "Username already exists", 409)
+			return
+		}
+
+		// 3. Check for Duplicate Email
+		var emailExists int
+		err = db.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", req.Email).Scan(&emailExists)
+		if err == nil && emailExists > 0 {
+			http.Error(w, "Email already exists", 409)
+			return
+		}
+
 		hash := sha256.Sum256([]byte(req.Password))
 		passHash := hex.EncodeToString(hash[:])
 
-		_, err := db.Exec("INSERT INTO users (username, password_hash, role, email) VALUES (?,?,?,?)", req.Username, passHash, req.Role, req.Email)
+		_, err = db.Exec("INSERT INTO users (username, password_hash, role, email) VALUES (?,?,?,?)", req.Username, passHash, req.Role, req.Email)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		w.WriteHeader(201)
+
 	} else if r.Method == "PUT" {
 		var req struct {
 			ID                              int `json:"id"`
 			Username, Password, Role, Email string
 		}
 		json.NewDecoder(r.Body).Decode(&req)
+
+		// 1. Validate Mandatory Email
+		if req.Email == "" {
+			http.Error(w, "Email is required", 400)
+			return
+		}
+
+		// 2. Check for Duplicate Email (excluding current user)
+		var emailExists int
+		err := db.QueryRow("SELECT COUNT(*) FROM users WHERE email = ? AND id != ?", req.Email, req.ID).Scan(&emailExists)
+		if err == nil && emailExists > 0 {
+			http.Error(w, "Email already exists", 409)
+			return
+		}
 
 		if req.Password != "" {
 			hash := sha256.Sum256([]byte(req.Password))
@@ -67,6 +105,7 @@ func handleUsers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		w.WriteHeader(200)
+
 	} else if r.Method == "DELETE" {
 		id := r.URL.Query().Get("id")
 		db.Exec("DELETE FROM users WHERE id=?", id)
@@ -95,11 +134,15 @@ func handlePermissions(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(perms)
 	} else if r.Method == "POST" {
+		// FIXED: Added json tags to map snake_case keys from frontend
 		var req struct {
-			UserId, DeviceId    int
-			HasAccess, CanWrite bool
+			UserId    int  `json:"user_id"`
+			DeviceId  int  `json:"device_id"`
+			HasAccess bool `json:"has_access"`
+			CanWrite  bool `json:"can_write"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
+		
 		if !req.HasAccess {
 			db.Exec("DELETE FROM user_device_permissions WHERE user_id=? AND device_id=?", req.UserId, req.DeviceId)
 		} else {
